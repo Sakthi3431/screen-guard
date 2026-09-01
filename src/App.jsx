@@ -7,18 +7,36 @@ const IMPORTANT_ALARMS = [
   "RRH VOLTAGE LOW",
 ];
 
+const SCAN_INTERVAL = 2000;
+
 export default function App() {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
+  const scanCanvasRef = useRef(null);
+  const overlayRef = useRef(null);
   const audioRef = useRef(null);
+
+  // Refs are used inside the continuous scan loop.
+  const streamRef = useRef(null);
+  const monitoringRef = useRef(false);
+  const processingRef = useRef(false);
+  const scanTimerRef = useRef(null);
+  const alertedAlarmsRef = useRef(new Set());
 
   const [monitoring, setMonitoring] = useState(false);
   const [status, setStatus] = useState("Ready");
   const [detectedText, setDetectedText] = useState("");
   const [activeAlarm, setActiveAlarm] = useState(null);
-  const [alertedAlarms, setAlertedAlarms] = useState(new Set());
   const [history, setHistory] = useState([]);
   const [processing, setProcessing] = useState(false);
+
+  // Alarm area is stored as percentages.
+  // This makes it work even if the video changes size.
+  const [alarmArea, setAlarmArea] = useState(null);
+
+  const [selectingArea, setSelectingArea] = useState(false);
+  const [selection, setSelection] = useState(null);
+
+  const selectionStartRef = useRef(null);
 
   useEffect(() => {
     return () => {
@@ -28,153 +46,463 @@ export default function App() {
 
   async function startCamera() {
     try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setStatus("Camera is not supported in this browser");
+        return;
+      }
+
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: "environment",
+          facingMode: {
+            ideal: "environment",
+          },
+          width: {
+            ideal: 1920,
+          },
+          height: {
+            ideal: 1080,
+          },
         },
         audio: false,
       });
 
-      videoRef.current.srcObject = stream;
+      streamRef.current = stream;
 
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+
+        await new Promise((resolve) => {
+          videoRef.current.onloadedmetadata = () => {
+            videoRef.current.play();
+            resolve();
+          };
+        });
+      }
+
+      monitoringRef.current = true;
       setMonitoring(true);
-      setStatus("Monitoring");
 
-      // Start scanning after camera loads
-      setTimeout(() => {
-        scanLoop();
-      }, 2000);
-
+      if (!alarmArea) {
+        setStatus("Camera started — select the alarm area");
+      } else {
+        setStatus("Monitoring");
+        startScanLoop();
+      }
     } catch (error) {
       console.error(error);
-      setStatus("Camera permission denied");
+
+      if (error.name === "NotAllowedError") {
+        setStatus("Camera permission denied");
+      } else {
+        setStatus("Camera error");
+      }
     }
   }
 
   function stopCamera() {
-    if (videoRef.current?.srcObject) {
-      const tracks = videoRef.current.srcObject.getTracks();
+    monitoringRef.current = false;
 
-      tracks.forEach((track) => track.stop());
+    if (scanTimerRef.current) {
+      clearTimeout(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
 
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
 
+    alertedAlarmsRef.current = new Set();
+
     setMonitoring(false);
+    setProcessing(false);
     setStatus("Stopped");
   }
 
+  function startScanLoop() {
+    if (scanTimerRef.current) {
+      clearTimeout(scanTimerRef.current);
+    }
+
+    scanLoop();
+  }
+
   async function scanLoop() {
-    if (!monitoring && !videoRef.current?.srcObject) {
+    if (!monitoringRef.current) {
       return;
     }
 
-    if (!processing) {
+    if (!processingRef.current) {
       await scanScreen();
     }
 
+    if (monitoringRef.current) {
+      scanTimerRef.current = setTimeout(
+        scanLoop,
+        SCAN_INTERVAL
+      );
+    }
+  }
+
+  function startAreaSelection() {
+    if (!monitoring) {
+      setStatus("Start the camera first");
+      return;
+    }
+
+    monitoringRef.current = false;
+
+    if (scanTimerRef.current) {
+      clearTimeout(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
+
+    setSelectingArea(true);
+    setSelection(null);
+    selectionStartRef.current = null;
+
+    setStatus("Draw a box around the alarm text");
+  }
+
+  function getPointerPosition(event) {
+    const element = overlayRef.current;
+
+    if (!element) {
+      return null;
+    }
+
+    const rect = element.getBoundingClientRect();
+
+    return {
+      x: ((event.clientX - rect.left) / rect.width) * 100,
+      y: ((event.clientY - rect.top) / rect.height) * 100,
+    };
+  }
+
+  function handlePointerDown(event) {
+    if (!selectingArea) {
+      return;
+    }
+
+    event.preventDefault();
+
+    event.currentTarget.setPointerCapture?.(
+      event.pointerId
+    );
+
+    const position = getPointerPosition(event);
+
+    if (!position) {
+      return;
+    }
+
+    selectionStartRef.current = position;
+
+    setSelection({
+      x: position.x,
+      y: position.y,
+      width: 0,
+      height: 0,
+    });
+  }
+
+  function handlePointerMove(event) {
+    if (
+      !selectingArea ||
+      !selectionStartRef.current
+    ) {
+      return;
+    }
+
+    const position = getPointerPosition(event);
+
+    if (!position) {
+      return;
+    }
+
+    const start = selectionStartRef.current;
+
+    const x = Math.min(start.x, position.x);
+    const y = Math.min(start.y, position.y);
+
+    const width = Math.abs(position.x - start.x);
+    const height = Math.abs(position.y - start.y);
+
+    setSelection({
+      x,
+      y,
+      width,
+      height,
+    });
+  }
+
+  function handlePointerUp() {
+    if (
+      !selectingArea ||
+      !selection ||
+      selection.width < 2 ||
+      selection.height < 2
+    ) {
+      return;
+    }
+
+    const finalArea = {
+      x: Math.max(0, selection.x),
+      y: Math.max(0, selection.y),
+      width: Math.min(
+        selection.width,
+        100 - selection.x
+      ),
+      height: Math.min(
+        selection.height,
+        100 - selection.y
+      ),
+    };
+
+    setAlarmArea(finalArea);
+    setSelection(null);
+    setSelectingArea(false);
+
+    setStatus(
+      "Alarm area selected — monitoring started"
+    );
+
+    monitoringRef.current = true;
+    alertedAlarmsRef.current = new Set();
+
     setTimeout(() => {
-      if (videoRef.current?.srcObject) {
-        scanLoop();
-      }
-    }, 2000);
+      startScanLoop();
+    }, 500);
+  }
+
+  function clearAlarmArea() {
+    monitoringRef.current = false;
+
+    if (scanTimerRef.current) {
+      clearTimeout(scanTimerRef.current);
+      scanTimerRef.current = null;
+    }
+
+    setAlarmArea(null);
+    setSelection(null);
+    alertedAlarmsRef.current = new Set();
+
+    if (monitoring) {
+      setStatus("Select a new alarm area");
+    }
   }
 
   async function scanScreen() {
     if (
       !videoRef.current ||
-      !canvasRef.current ||
-      processing
+      !scanCanvasRef.current ||
+      !alarmArea ||
+      processingRef.current
     ) {
       return;
     }
 
-    setProcessing(true);
-    setStatus("Scanning...");
-
     const video = videoRef.current;
-    const canvas = canvasRef.current;
 
-    const context = canvas.getContext("2d");
+    if (
+      !video.videoWidth ||
+      !video.videoHeight
+    ) {
+      return;
+    }
 
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-
-    context.drawImage(
-      video,
-      0,
-      0,
-      canvas.width,
-      canvas.height
-    );
+    processingRef.current = true;
+    setProcessing(true);
+    setStatus("Scanning alarm area...");
 
     try {
-      const result = await Tesseract.recognize(
-        canvas,
-        "eng"
+      const sourceWidth = video.videoWidth;
+      const sourceHeight = video.videoHeight;
+
+      const cropX =
+        Math.round(
+          (alarmArea.x / 100) * sourceWidth
+        );
+
+      const cropY =
+        Math.round(
+          (alarmArea.y / 100) * sourceHeight
+        );
+
+      const cropWidth =
+        Math.round(
+          (alarmArea.width / 100) * sourceWidth
+        );
+
+      const cropHeight =
+        Math.round(
+          (alarmArea.height / 100) * sourceHeight
+        );
+
+      if (
+        cropWidth < 10 ||
+        cropHeight < 10
+      ) {
+        return;
+      }
+
+      // Make the text larger before OCR.
+      const scale = 2;
+
+      const canvas = scanCanvasRef.current;
+
+      canvas.width = cropWidth * scale;
+      canvas.height = cropHeight * scale;
+
+      const context = canvas.getContext(
+        "2d",
+        {
+          willReadFrequently: true,
+        }
       );
 
-      const text = result.data.text;
+      // Draw only the selected alarm area.
+      context.drawImage(
+        video,
+        cropX,
+        cropY,
+        cropWidth,
+        cropHeight,
+        0,
+        0,
+        canvas.width,
+        canvas.height
+      );
+
+      // Improve the image for OCR.
+      preprocessImage(
+        context,
+        canvas.width,
+        canvas.height
+      );
+
+      const result = await Tesseract.recognize(
+        canvas,
+        "eng",
+        {
+          logger: () => {},
+        }
+      );
+
+      const text = result.data.text || "";
 
       setDetectedText(text);
 
       checkForAlarms(text);
 
-      setStatus("Monitoring");
-
+      if (monitoringRef.current) {
+        setStatus("Monitoring");
+      }
     } catch (error) {
       console.error("OCR Error:", error);
       setStatus("OCR Error");
-
     } finally {
+      processingRef.current = false;
       setProcessing(false);
     }
+  }
+
+  function preprocessImage(
+    context,
+    width,
+    height
+  ) {
+    const imageData =
+      context.getImageData(
+        0,
+        0,
+        width,
+        height
+      );
+
+    const data = imageData.data;
+
+    for (let i = 0; i < data.length; i += 4) {
+      const red = data[i];
+      const green = data[i + 1];
+      const blue = data[i + 2];
+
+      // Convert to grayscale.
+      let gray =
+        0.299 * red +
+        0.587 * green +
+        0.114 * blue;
+
+      // Increase contrast.
+      const contrast = 1.8;
+
+      gray =
+        ((gray - 128) * contrast) +
+        128;
+
+      gray = Math.max(
+        0,
+        Math.min(255, gray)
+      );
+
+      // Strong thresholding for text.
+      const threshold =
+        gray > 160 ? 255 : 0;
+
+      data[i] = threshold;
+      data[i + 1] = threshold;
+      data[i + 2] = threshold;
+    }
+
+    context.putImageData(
+      imageData,
+      0,
+      0
+    );
   }
 
   function normalizeText(text) {
     return text
       .toUpperCase()
-      .replace(/[^\w\s]/g, " ")
+      .replace(/[^A-Z0-9\s]/g, " ")
       .replace(/\s+/g, " ")
       .trim();
   }
 
   function checkForAlarms(text) {
-    const normalizedText = normalizeText(text);
+    const normalizedText =
+      normalizeText(text);
 
-    const currentlyVisible = IMPORTANT_ALARMS.filter(
-      (alarm) =>
-        normalizedText.includes(
+    const currentlyVisible =
+      IMPORTANT_ALARMS.filter((alarm) => {
+        return normalizedText.includes(
           normalizeText(alarm)
-        )
-    );
-
-    // Remove alarms that disappeared
-    setAlertedAlarms((previous) => {
-      const updated = new Set(previous);
-
-      previous.forEach((alarm) => {
-        if (!currentlyVisible.includes(alarm)) {
-          updated.delete(alarm);
-        }
+        );
       });
 
-      return updated;
-    });
+    const previous =
+      alertedAlarmsRef.current;
+
+    // Remove alarms that disappeared.
+    const updated = new Set();
 
     currentlyVisible.forEach((alarm) => {
-      if (!alertedAlarms.has(alarm)) {
+      updated.add(alarm);
+    });
+
+    // Trigger only alarms that were not
+    // already visible in the previous scan.
+    currentlyVisible.forEach((alarm) => {
+      if (!previous.has(alarm)) {
         triggerAlarm(alarm);
-
-        setAlertedAlarms((previous) => {
-          const updated = new Set(previous);
-
-          updated.add(alarm);
-
-          return updated;
-        });
       }
     });
+
+    alertedAlarmsRef.current = updated;
   }
 
   function triggerAlarm(alarm) {
@@ -182,15 +510,17 @@ export default function App() {
 
     addHistory(alarm);
 
-    // Play alarm
     if (audioRef.current) {
       audioRef.current.currentTime = 0;
-      audioRef.current.play().catch(() => {
-        console.log("Audio needs user interaction first");
+
+      audioRef.current.play().catch((error) => {
+        console.log(
+          "Audio playback blocked:",
+          error
+        );
       });
     }
 
-    // Vibrate
     if (navigator.vibrate) {
       navigator.vibrate([
         1000,
@@ -216,7 +546,8 @@ export default function App() {
   }
 
   function addHistory(alarm) {
-    const time = new Date().toLocaleTimeString();
+    const time =
+      new Date().toLocaleTimeString();
 
     setHistory((previous) => [
       {
@@ -229,7 +560,6 @@ export default function App() {
 
   return (
     <div className="app">
-
       <h1>🛡️ ScreenGuard</h1>
 
       <p className="status">
@@ -243,10 +573,59 @@ export default function App() {
           playsInline
           muted
         />
+
+        {monitoring && (
+          <div
+            ref={overlayRef}
+            className={
+              selectingArea
+                ? "selection-overlay selecting"
+                : "selection-overlay"
+            }
+            onPointerDown={handlePointerDown}
+            onPointerMove={handlePointerMove}
+            onPointerUp={handlePointerUp}
+          >
+            {alarmArea && !selectingArea && (
+              <div
+                className="saved-area"
+                style={{
+                  left: `${alarmArea.x}%`,
+                  top: `${alarmArea.y}%`,
+                  width: `${alarmArea.width}%`,
+                  height: `${alarmArea.height}%`,
+                }}
+              >
+                <span>
+                  OCR AREA
+                </span>
+              </div>
+            )}
+
+            {selection && (
+              <div
+                className="drawing-area"
+                style={{
+                  left: `${selection.x}%`,
+                  top: `${selection.y}%`,
+                  width: `${selection.width}%`,
+                  height: `${selection.height}%`,
+                }}
+              />
+            )}
+
+            {selectingArea && (
+              <div className="selection-help">
+                Drag around the alarm
+                column/text
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       <canvas
-        ref={canvasRef}
+        ref={scanCanvasRef}
         style={{ display: "none" }}
       />
 
@@ -255,21 +634,53 @@ export default function App() {
           className="start-btn"
           onClick={startCamera}
         >
-          📷 Start Monitoring
+          📷 Start Camera
         </button>
       ) : (
-        <button
-          className="stop-btn"
-          onClick={stopCamera}
-        >
-          ⏹ Stop Monitoring
-        </button>
+        <div className="button-row">
+          {!selectingArea && (
+            <button
+              className="select-btn"
+              onClick={startAreaSelection}
+            >
+              ✏️ Select Alarm Area
+            </button>
+          )}
+
+          {alarmArea && !selectingArea && (
+            <button
+              className="clear-btn"
+              onClick={clearAlarmArea}
+            >
+              🗑 Change Area
+            </button>
+          )}
+
+          <button
+            className="stop-btn"
+            onClick={stopCamera}
+          >
+            ⏹ Stop
+          </button>
+        </div>
       )}
+
+      {monitoring &&
+        !alarmArea &&
+        !selectingArea && (
+          <button
+            className="select-btn big-select"
+            onClick={startAreaSelection}
+          >
+            ✏️ Select Alarm Area
+          </button>
+        )}
 
       {activeAlarm && (
         <div className="alarm-box">
-
-          <h2>⚠ CRITICAL ALARM</h2>
+          <h2>
+            ⚠ CRITICAL ALARM
+          </h2>
 
           <div className="alarm-name">
             {activeAlarm}
@@ -279,55 +690,65 @@ export default function App() {
             className="ignore-btn"
             onClick={ignoreAlarm}
           >
-            IGNORE ALARM
+            🔕 IGNORE ALARM
           </button>
-
         </div>
       )}
 
       <section>
-
         <h2>Last OCR Result</h2>
 
         <div className="text-box">
-          {detectedText || "Waiting for scan..."}
+          {detectedText ||
+            "Waiting for scan..."}
         </div>
 
+        {processing && (
+          <p>
+            🔍 Reading alarm area...
+          </p>
+        )}
       </section>
 
       <section>
-
         <h2>Important Alarms</h2>
 
         <ul>
-          {IMPORTANT_ALARMS.map((alarm) => (
-            <li key={alarm}>
-              ⚠ {alarm}
-            </li>
-          ))}
+          {IMPORTANT_ALARMS.map(
+            (alarm) => (
+              <li key={alarm}>
+                ⚠ {alarm}
+              </li>
+            )
+          )}
         </ul>
-
       </section>
 
       <section>
-
         <h2>Alert History</h2>
 
         {history.length === 0 && (
-          <p>No alarms detected yet.</p>
+          <p>
+            No alarms detected yet.
+          </p>
         )}
 
-        {history.map((item, index) => (
-          <div
-            className="history-item"
-            key={index}
-          >
-            <strong>{item.alarm}</strong>
+        {history.map(
+          (item, index) => (
+            <div
+              className="history-item"
+              key={index}
+            >
+              <strong>
+                {item.alarm}
+              </strong>
 
-            <span>{item.time}</span>
-          </div>
-        ))}
-
+              <span>
+                {item.time}
+              </span>
+            </div>
+          )
+        )}
       </section>
 
       <audio
@@ -335,7 +756,6 @@ export default function App() {
         loop
         src="/alarm.mp3"
       />
-
     </div>
   );
 }
