@@ -1,0 +1,102 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: #101010;
+  color: white;
+  font-family: Arial, sans-serif;
+}
+
+.app {
+  max-width: 600px;
+  margin: auto;
+  padding: 20px;
+}
+
+h1 {
+  text-align: center;
+}
+
+.status {
+  text-align: center;
+  color: #90ee90;
+  font-weight: bold;
+}
+
+.camera-container {
+  width: 100%;
+  background: black;
+  border-radius: 15px;
+  overflow: hidden;
+  margin: 20px 0;
+}
+
+video {
+  width: 100%;
+  display: block;
+}
+
+button {
+  width: 100%;
+  border: none;
+  padding: 16px;
+  font-size: 17px;
+  font-weight: bold;
+  border-radius: 10px;
+  margin-bottom: 15px;
+  cursor: pointer;
+}
+
+.start-btn {
+  background: #2ecc71;
+  color: white;
+}
+
+.stop-btn {
+  background: #e74c3c;
+  color: white;
+}
+
+.alarm-box {
+  background: #b71c1c;
+  border: 3px solid red;
+  padding: 20px;
+  border-radius: 15px;
+  text-align: center;
+  margin: 20px 0;
+}
+
+.alarm-name {
+  font-size: 24px;
+  font-weight: bold;
+  margin: 20px 0;
+}
+
+.ignore-btn {
+  background: white;
+  color: black;
+}
+
+.text-box {
+  background: #222;
+  padding: 15px;
+  border-radius: 10px;
+  min-height: 100px;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+.history-item {
+  display: flex;
+  justify-content: space-between;
+  background: #222;
+  padding: 12px;
+  margin: 8px 0;
+  border-radius: 8px;
+}
+
+li {
+  margin: 10px 0;
+}
