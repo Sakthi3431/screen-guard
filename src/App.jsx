@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import Tesseract from "tesseract.js";
+import { createWorker, PSM } from "tesseract.js";
 
 const IMPORTANT_ALARMS = [
   "SERVICE OFF",
@@ -10,6 +10,7 @@ const IMPORTANT_ALARMS = [
 const SCAN_INTERVAL = 2000;
 
 export default function App() {
+  const workerRef = useRef(null);
   const videoRef = useRef(null);
   const scanCanvasRef = useRef(null);
   const overlayRef = useRef(null);
@@ -297,119 +298,112 @@ export default function App() {
   }
 
   async function scanScreen() {
-    if (
-      !videoRef.current ||
-      !scanCanvasRef.current ||
-      !alarmArea ||
-      processingRef.current
-    ) {
+  if (
+    !videoRef.current ||
+    !scanCanvasRef.current ||
+    !alarmArea ||
+    processingRef.current
+  ) {
+    return;
+  }
+
+  const video = videoRef.current;
+
+  if (!video.videoWidth || !video.videoHeight) {
+    return;
+  }
+
+  processingRef.current = true;
+  setProcessing(true);
+  setStatus("Reading alarm text...");
+
+  try {
+    const sourceWidth = video.videoWidth;
+    const sourceHeight = video.videoHeight;
+
+    const cropX = Math.round(
+      (alarmArea.x / 100) * sourceWidth
+    );
+
+    const cropY = Math.round(
+      (alarmArea.y / 100) * sourceHeight
+    );
+
+    const cropWidth = Math.round(
+      (alarmArea.width / 100) * sourceWidth
+    );
+
+    const cropHeight = Math.round(
+      (alarmArea.height / 100) * sourceHeight
+    );
+
+    if (cropWidth < 20 || cropHeight < 20) {
       return;
     }
 
-    const video = videoRef.current;
+    const canvas = scanCanvasRef.current;
 
-    if (
-      !video.videoWidth ||
-      !video.videoHeight
-    ) {
-      return;
+    // Make text significantly larger.
+    const scale = 3;
+
+    canvas.width = cropWidth * scale;
+    canvas.height = cropHeight * scale;
+
+    const context = canvas.getContext("2d");
+
+    // Draw ONLY the selected alarm area.
+    context.drawImage(
+      video,
+      cropX,
+      cropY,
+      cropWidth,
+      cropHeight,
+      0,
+      0,
+      canvas.width,
+      canvas.height
+    );
+
+    // Initialize OCR only once.
+    if (!workerRef.current) {
+      setStatus("Starting OCR engine...");
+
+      workerRef.current = await createWorker(
+        "eng",
+        1
+      );
+
+      await workerRef.current.setParameters({
+        tessedit_pageseg_mode: PSM.SINGLE_BLOCK,
+      });
     }
 
-    processingRef.current = true;
-    setProcessing(true);
     setStatus("Scanning alarm area...");
 
-    try {
-      const sourceWidth = video.videoWidth;
-      const sourceHeight = video.videoHeight;
+    const result =
+      await workerRef.current.recognize(canvas);
 
-      const cropX =
-        Math.round(
-          (alarmArea.x / 100) * sourceWidth
-        );
+    const text = result.data.text || "";
 
-      const cropY =
-        Math.round(
-          (alarmArea.y / 100) * sourceHeight
-        );
+    setDetectedText(text);
 
-      const cropWidth =
-        Math.round(
-          (alarmArea.width / 100) * sourceWidth
-        );
+    console.log("OCR RESULT:", text);
 
-      const cropHeight =
-        Math.round(
-          (alarmArea.height / 100) * sourceHeight
-        );
+    checkForAlarms(text);
 
-      if (
-        cropWidth < 10 ||
-        cropHeight < 10
-      ) {
-        return;
-      }
-
-      // Make the text larger before OCR.
-      const scale = 2;
-
-      const canvas = scanCanvasRef.current;
-
-      canvas.width = cropWidth * scale;
-      canvas.height = cropHeight * scale;
-
-      const context = canvas.getContext(
-        "2d",
-        {
-          willReadFrequently: true,
-        }
-      );
-
-      // Draw only the selected alarm area.
-      context.drawImage(
-        video,
-        cropX,
-        cropY,
-        cropWidth,
-        cropHeight,
-        0,
-        0,
-        canvas.width,
-        canvas.height
-      );
-
-      // Improve the image for OCR.
-      preprocessImage(
-        context,
-        canvas.width,
-        canvas.height
-      );
-
-      const result = await Tesseract.recognize(
-        canvas,
-        "eng",
-        {
-          logger: () => {},
-        }
-      );
-
-      const text = result.data.text || "";
-
-      setDetectedText(text);
-
-      checkForAlarms(text);
-
-      if (monitoringRef.current) {
-        setStatus("Monitoring");
-      }
-    } catch (error) {
-      console.error("OCR Error:", error);
-      setStatus("OCR Error");
-    } finally {
-      processingRef.current = false;
-      setProcessing(false);
+    if (monitoringRef.current) {
+      setStatus("Monitoring");
     }
+
+  } catch (error) {
+    console.error("OCR Error:", error);
+    setStatus("OCR Error — check console");
+
+  } finally {
+    processingRef.current = false;
+    setProcessing(false);
   }
+}
 
   function preprocessImage(
     context,
